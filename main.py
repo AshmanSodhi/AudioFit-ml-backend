@@ -247,7 +247,7 @@ AI_SYSTEM_PROMPT = (
     "You are AudioFit AI, a workout music recommender. "
     "Given a user prompt about running/workout/mood, return ONLY a JSON array of songs. "
     "Each element: {\"title\": \"song name\", \"artist\": \"artist name\", \"reason\": \"<=12 words why it fits the prompt\"}. "
-    "Rules: The songs suggested, their total duration should be atleast 5 mins more than the requested. If no time given, then take the default time to be 20Mins or suggest max 10 songs. Match language if user said English/Hindi/Mix. "
+    "Rules: The songs suggested, their total duration should be at least 5 mins more than the requested. If no time given, default to 20 mins. Match language if user said English/Hindi/Mix. "
     "Prefer high-energy for runs, chill for warmup/cooldown. "
     "Return valid JSON array and nothing else — no markdown, no explanation."
 )
@@ -280,7 +280,7 @@ def _call_mistral(user_prompt: str, language: str = "mix", count: int = 10):
             {"role": "user", "content": f'User prompt: "{user_prompt}"\nLanguage preference: {lang_hint}\nReturn exactly {count} songs as JSON array.'},
         ],
         "temperature": 0.7,
-        "max_tokens": 1200,
+        "max_tokens": 3000,
     }
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     r = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=12)
@@ -291,7 +291,7 @@ def _call_mistral(user_prompt: str, language: str = "mix", count: int = 10):
     if not arr:
         raise HTTPException(status_code=502, detail=f"LLM did not return valid JSON: {content[:400]}")
     out = []
-    for item in arr[:count]:
+    for item in arr:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title", "")).strip()
@@ -312,7 +312,7 @@ class AIRequest(BaseModel):
 def ai_recommend(body: AIRequest):
     prompt = (body.prompt or body.q or "").strip()
     language = (body.language or "mix").strip()
-    count = max(1, min(int(body.count or 10), 12))
+    count = max(3, int(body.count or 10))
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     if len(prompt) > 500:

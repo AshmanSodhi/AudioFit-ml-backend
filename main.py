@@ -6,7 +6,8 @@ import os
 import re
 import json
 import requests
-
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 # --------------------------------------------------
 # Load model files
@@ -19,6 +20,17 @@ df_hin = pd.read_pickle("hin_song_catalog.pkl")
 scaler_eng = joblib.load("scaler_eng.pkl")
 knn_eng = joblib.load("knn_model_eng.pkl")
 df_eng = pd.read_pickle("eng_song_catalog.pkl")
+
+# ============================================================
+# LOAD V2 MODEL CONFIGURATION
+# ============================================================
+
+v2_model = joblib.load("v2_model.pkl")
+
+v2_scaler = v2_model["scaler"]
+
+V2_USER_WEIGHT = v2_model["user_weight"]
+V2_CONTENT_WEIGHT = v2_model["content_weight"]
 
 # --------------------------------------------------
 # Features used by the model
@@ -319,3 +331,473 @@ def ai_recommend(body: AIRequest):
         raise HTTPException(status_code=400, detail="prompt too long (max 500 chars)")
     songs = _call_mistral(prompt, language, count)
     return {"songs": songs, "model": MISTRAL_MODEL}
+
+
+
+# ============================================================
+# V2 FAVORITE SONG
+# ============================================================
+
+class FavoriteSong(BaseModel):
+
+    acousticness: float
+    danceability: float
+    energy: float
+    instrumentalness: float
+    liveness: float
+    loudness: float
+    speechiness: float
+    tempo: float
+    valence: float
+
+
+# ============================================================
+# V2 PROFILE CREATION REQUEST
+# ============================================================
+
+class CreateProfileRequest(BaseModel):
+
+    favorite_songs: list[FavoriteSong]
+
+
+# ============================================================
+# V2 RECOMMENDATION REQUEST
+# ============================================================
+
+class V2Request(BaseModel):
+
+    user_profile: list[float]
+
+    acousticness: float
+    danceability: float
+    energy: float
+    instrumentalness: float
+    liveness: float
+    loudness: float
+    speechiness: float
+    tempo: float
+    valence: float
+
+    n_recommendations: int = 10
+
+
+# ============================================================
+# HELPER
+# ============================================================
+
+def create_song_dataframe(song):
+
+    return pd.DataFrame([{
+        "acousticness": song.acousticness,
+        "danceability": song.danceability,
+        "energy": song.energy,
+        "instrumentalness": song.instrumentalness,
+        "liveness": song.liveness,
+        "loudness": song.loudness,
+        "speechiness": song.speechiness,
+        "tempo": song.tempo,
+        "valence": song.valence
+    }])
+
+# ============================================================
+# V2 - CREATE USER PROFILE
+# ============================================================
+
+@app.post("/create_profile")
+def create_profile(request: CreateProfileRequest):
+
+    # --------------------------------------------------------
+    # Minimum 10 favorites
+    # --------------------------------------------------------
+
+    if len(request.favorite_songs) < 10:
+
+        raise HTTPException(
+            status_code=400,
+            detail="At least 10 favorite songs are required."
+        )
+
+
+    # --------------------------------------------------------
+    # Convert to DataFrame
+    # --------------------------------------------------------
+
+    songs = pd.DataFrame([
+        song.model_dump()
+        for song in request.favorite_songs
+    ])
+
+
+    # --------------------------------------------------------
+    # Correct feature order
+    # --------------------------------------------------------
+
+    songs = songs[
+        FEATURE_COLUMNS
+    ]
+
+
+    # --------------------------------------------------------
+    # Scale using V2 scaler
+    # --------------------------------------------------------
+
+    songs_scaled = v2_scaler.transform(
+        songs[FEATURE_COLUMNS]
+    )
+
+
+    # --------------------------------------------------------
+    # Create profile
+    #
+    # All selected songs are positive preferences.
+    # --------------------------------------------------------
+
+    user_profile = np.mean(
+        songs_scaled,
+        axis=0
+    )
+
+
+    # --------------------------------------------------------
+    # Return profile to mobile app
+    # --------------------------------------------------------
+
+    return {
+
+        "status": "success",
+
+        "profile": user_profile.tolist(),
+
+        "profile_dimensions": len(
+            user_profile
+        ),
+
+        "songs_used": len(songs)
+    }
+
+
+# ============================================================
+# V2 - RECOMMEND
+# ============================================================
+
+@app.post("/recommend_v2")
+def recommend_v2(request: V2Request):
+
+    # --------------------------------------------------------
+    # Validate recommendation count
+    # --------------------------------------------------------
+
+    if request.n_recommendations < 1:
+
+        raise HTTPException(
+            status_code=400,
+            detail="n_recommendations must be at least 1"
+        )
+
+    if request.n_recommendations > 100:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 100 recommendations allowed"
+        )
+
+
+    # --------------------------------------------------------
+    # Validate user profile
+    # --------------------------------------------------------
+
+    if len(request.user_profile) != len(
+        FEATURE_COLUMNS
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"user_profile must contain "
+                f"{len(FEATURE_COLUMNS)} values."
+            )
+        )
+
+
+    # --------------------------------------------------------
+    # Create current-song DataFrame
+    # --------------------------------------------------------
+
+    current_song = create_song_dataframe(
+        request
+    )
+
+
+    # ========================================================
+    # STEP 1
+    # V1 → 50 ENGLISH
+    # ========================================================
+
+    current_eng_scaled = (
+        scaler_eng.transform(
+            current_song[
+                FEATURE_COLUMNS
+            ]
+        )
+    )
+
+    eng_n = min(
+        51,
+        len(df_eng)
+    )
+
+    eng_distances, eng_indices = (
+        knn_eng.kneighbors(
+            current_eng_scaled,
+            n_neighbors=eng_n
+        )
+    )
+
+    eng_candidates = df_eng.iloc[
+        eng_indices[0]
+    ].copy()
+
+    eng_candidates = (
+        eng_candidates
+        .drop_duplicates(
+            subset=["track_id"]
+        )
+        .head(50)
+    )
+
+
+    # ========================================================
+    # STEP 2
+    # V1 → 50 HINDI
+    # ========================================================
+
+    current_hin_scaled = (
+        scaler_hin.transform(
+            current_song[
+                FEATURE_COLUMNS
+            ]
+        )
+    )
+
+    hin_n = min(
+        51,
+        len(df_hin)
+    )
+
+    hin_distances, hin_indices = (
+        knn_hin.kneighbors(
+            current_hin_scaled,
+            n_neighbors=hin_n
+        )
+    )
+
+    hin_candidates = df_hin.iloc[
+        hin_indices[0]
+    ].copy()
+
+    hin_candidates = (
+        hin_candidates
+        .drop_duplicates(
+            subset=["track_id"]
+        )
+        .head(50)
+    )
+
+
+    # ========================================================
+    # STEP 3
+    # COMBINE V1 CANDIDATES
+    # ========================================================
+
+    candidates = pd.concat(
+        [
+            eng_candidates,
+            hin_candidates
+        ],
+        ignore_index=True
+    )
+
+    candidates = (
+        candidates
+        .drop_duplicates(
+            subset=["track_id"]
+        )
+        .reset_index(drop=True)
+    )
+
+
+    if len(candidates) == 0:
+
+        raise HTTPException(
+            status_code=500,
+            detail="V1 generated no candidates."
+        )
+
+
+    # ========================================================
+    # STEP 4
+    # SCALE CANDIDATES USING V2 SCALER
+    # ========================================================
+
+    candidate_features = (
+        candidates[
+            FEATURE_COLUMNS
+        ]
+    )
+
+    candidate_scaled = (
+        v2_scaler.transform(
+            candidate_features
+        )
+    )
+
+
+    # ========================================================
+    # STEP 5
+    # SCALE CURRENT SONG
+    # ========================================================
+
+    current_scaled = (
+        v2_scaler.transform(
+            current_song[
+                FEATURE_COLUMNS
+            ]
+        )
+    )
+
+
+    # ========================================================
+    # STEP 6
+    # CONTENT SIMILARITY
+    # ========================================================
+
+    content_similarity = (
+        cosine_similarity(
+            current_scaled,
+            candidate_scaled
+        )[0]
+    )
+
+
+    # ========================================================
+    # STEP 7
+    # USER SIMILARITY
+    # ========================================================
+
+    user_profile = np.asarray(
+        request.user_profile,
+        dtype=float
+    ).reshape(1, -1)
+
+
+    user_similarity = (
+        cosine_similarity(
+            user_profile,
+            candidate_scaled
+        )[0]
+    )
+
+
+    # ========================================================
+    # STEP 8
+    # V2 FINAL SCORE
+    # ========================================================
+
+    v2_scores = (
+        V2_USER_WEIGHT *
+        user_similarity
+        +
+        V2_CONTENT_WEIGHT *
+        content_similarity
+    )
+
+
+    # ========================================================
+    # STEP 9
+    # RANK
+    # ========================================================
+
+    ranked_indices = np.argsort(
+        v2_scores
+    )[::-1]
+
+    ranked_indices = ranked_indices[
+        :request.n_recommendations
+    ]
+
+
+    recommendations = candidates.iloc[
+        ranked_indices
+    ].copy()
+
+
+    # ========================================================
+    # STEP 10
+    # ADD SCORES
+    # ========================================================
+
+    recommendations[
+        "v2_score"
+    ] = v2_scores[
+        ranked_indices
+    ]
+
+    recommendations[
+        "content_similarity"
+    ] = content_similarity[
+        ranked_indices
+    ]
+
+    recommendations[
+        "user_similarity"
+    ] = user_similarity[
+        ranked_indices
+    ]
+
+
+    # ========================================================
+    # STEP 11
+    # RESPONSE
+    # ========================================================
+
+    result_columns = [
+        "track_id",
+        "track_name",
+        "artist_name",
+        "album_name",
+        "year",
+        "language",
+        "popularity",
+        "v2_score",
+        "content_similarity",
+        "user_similarity"
+    ]
+
+    result_columns = [
+        col
+        for col in result_columns
+        if col in recommendations.columns
+    ]
+
+
+    results = recommendations[
+        result_columns
+    ].to_dict(
+        orient="records"
+    )
+
+
+    return {
+
+        "model": "V2",
+
+        "candidate_count": len(
+            candidates
+        ),
+
+        "recommendation_count": len(
+            results
+        ),
+
+        "recommendations": results
+    }

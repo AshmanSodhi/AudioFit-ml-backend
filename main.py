@@ -8,6 +8,9 @@ import json
 import requests
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --------------------------------------------------
 # Load model files
@@ -296,7 +299,7 @@ def _call_gemini(user_prompt: str, language: str = "mix", count: int = 10):
         },
     }
     headers = {"Content-Type": "application/json"}
-    r = requests.post(url, headers=headers, json=payload, timeout=12)
+    r = requests.post(url, headers=headers, json=payload, timeout=120)
     if not r.ok:
         raise HTTPException(status_code=502, detail=f"Gemini {r.status_code}: {r.text[:400]}")
     try:

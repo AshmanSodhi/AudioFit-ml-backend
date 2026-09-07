@@ -251,9 +251,8 @@ def recommend_hin(song: SongFeatures):
         "recommendations": results
     }
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
-MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 AI_SYSTEM_PROMPT = (
     "You are AudioFit AI, a workout music recommender. "
@@ -281,24 +280,34 @@ def _extract_json_array(text: str):
             return None
     return None
 
-def _call_mistral(user_prompt: str, language: str = "mix", count: int = 10):
-    if not MISTRAL_API_KEY:
-        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY not set on server (Render > Environment)")
+def _call_gemini(user_prompt: str, language: str = "mix", count: int = 10):
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set on server (Render > Environment)")
     lang_hint = {"english": "English only", "hindi": "Hindi/Bollywood only", "mix": "mix of English and Hindi"}.get(language.lower(), "mix of English and Hindi")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": AI_SYSTEM_PROMPT},
-            {"role": "user", "content": f'User prompt: "{user_prompt}"\nLanguage preference: {lang_hint}\nReturn exactly {count} songs as JSON array.'},
+        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": f'User prompt: "{user_prompt}"\nLanguage preference: {lang_hint}\nReturn exactly {count} songs as JSON array.'}]},
         ],
-        "temperature": 0.7,
-        "max_tokens": 3000,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 3000,
+        },
     }
-    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    r = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=12)
+    headers = {"Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, json=payload, timeout=12)
     if not r.ok:
-        raise HTTPException(status_code=502, detail=f"Mistral {r.status_code}: {r.text[:400]}")
-    content = (r.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        raise HTTPException(status_code=502, detail=f"Gemini {r.status_code}: {r.text[:400]}")
+    try:
+        data = r.json()
+        candidates = data.get("candidates", [])
+        parts = (candidates[0].get("content", {}).get("parts", []) if candidates else [])
+        content = "".join([str(p.get("text", "")) for p in parts if isinstance(p, dict)]).strip()
+    except Exception:
+        content = ""
+    if not content:
+        raise HTTPException(status_code=502, detail=f"LLM did not return valid JSON: {r.text[:400]}")
     arr = _extract_json_array(content)
     if not arr:
         raise HTTPException(status_code=502, detail=f"LLM did not return valid JSON: {content[:400]}")
@@ -329,8 +338,8 @@ def ai_recommend(body: AIRequest):
         raise HTTPException(status_code=400, detail="prompt is required")
     if len(prompt) > 500:
         raise HTTPException(status_code=400, detail="prompt too long (max 500 chars)")
-    songs = _call_mistral(prompt, language, count)
-    return {"songs": songs, "model": MISTRAL_MODEL}
+    songs = _call_gemini(prompt, language, count)
+    return {"songs": songs, "model": GEMINI_MODEL}
 
 
 
